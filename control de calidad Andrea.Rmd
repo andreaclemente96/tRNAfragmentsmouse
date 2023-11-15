@@ -1,0 +1,406 @@
+---
+title: "Control de calidad"
+author: "Andrea Clemente Ureña"
+date: "2023-11-06"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+all_sequence_tRNA_level_ok <- read.delim("C:/Users/andea/OneDrive/Escritorio/TFM/all_sequence_tRNA_level_ok.csv")
+```
+## Eliminar filas de 0
+
+Eliminar todas las filas que no tengan minimo 5 veces de expresión en 4 zonas de cerebro de ratones.
+
+```{r}
+library(dplyr)
+datoscrudos<-all_sequence_tRNA_level_ok
+#Reordenamos filas 
+datoscrudos <- datoscrudos %>%
+  select(X, Sequence, tRNA, short_trim1_SR1, everything())
+
+# Conteo de valores mayores o iguales a 5 en las columnas "short_trim1_"
+conteos <- rowSums(datoscrudos[, grepl("short_trim1_", names(datoscrudos))] >= 5)
+
+# Filtrar las filas 
+data_filtrado <- datoscrudos[conteos >= 4, ]
+
+data_filtrado
+```
+## Control de calidad - Normalización, transformación rlog
+```{r}
+# Seleccionar las columnas que contienen niveles de expresión para normalizar
+columnas_expresion <- data_filtrado[, -c(1, 2, 3)]
+
+# Crear un vector de grupos correspondientes a las columnas 
+nombres_columnas <- colnames(columnas_expresion)
+grupos <- sub(".*_(SR\\d+|SW\\d+|CR\\d+|CW\\d+)_.*", "\\1", nombres_columnas)
+
+# Crear un DataFrame para colData que contiene información sobre las muestras y grupos
+colData <- data.frame(SampleName = colnames(columnas_expresion), Group = grupos)
+
+#DESeq2 - transformación logarítmica regularizada
+library(DESeq2)
+design <- formula(~ Group)
+dds <- DESeqDataSetFromMatrix(countData = columnas_expresion, colData = colData, design = design)
+logarit <- rlog(dds)
+# Extraer la matriz de expresión transformada rlog
+rlog_matrix <- assay(logarit)
+
+# Normalización por la suma total de lecturas
+data_filtrado_norm <- columnas_expresion
+data_filtrado_norm[, grepl("short_trim1_", names(data_filtrado_norm))] <- 
+  columnas_expresion / colSums(columnas_expresion)
+ 
+# Definir los grupos y colores 
+grupos <- c("short_trim1_SR1", "short_trim1_SR2", "short_trim1_SR3", "short_trim1_SR4",
+            "short_trim1_SW1", "short_trim1_SW2", "short_trim1_SW3", "short_trim1_SW4",
+            "short_trim1_CR1", "short_trim1_CR2", "short_trim1_CR3", "short_trim1_CR4",
+            "short_trim1_CW1", "short_trim1_CW2", "short_trim1_CW3", "short_trim1_CW4")
+colores <- c(rep("red", 4), rep("blue", 4), rep("green", 4), rep("orange", 4))
+
+# boxplots coloreados
+boxplotlog<-boxplot(rlog_matrix, col = colores)
+legend("topright", legend = c("SR", "SW", "CR", "CW"),
+       fill = c("red", "blue", "green", "orange"))
+
+boxplotsum <- boxplot(data_filtrado_norm, col = colores, ylim = c(0, 0.00009))
+legend("topright", legend = c("SR", "SW", "CR", "CW"),
+       fill = c("red", "blue", "green", "orange"))
+
+
+```
+
+
+Podemos ver que la transformación logarítmica regularizada es la mejor forma de tratar nuestros datos, ya que en el boxplot se ven las medias más igualadas entre nuestras muestras.
+
+
+## PCA y correlación general
+
+```{r}
+# optimizar nombres
+nombres_actuales <- colnames(rlog_matrix)
+
+# elimino "short_trim1_" de los nombres de las columnas
+nuevos_nombres <- sub("^short_trim1_", "", nombres_actuales)
+
+colnames(rlog_matrix) <- nuevos_nombres
+
+pca_result <- prcomp(rlog_matrix, scale = TRUE) 
+# Cargar la biblioteca
+library(ggplot2)
+
+# Crear un dataframe con los resultados del PCA
+pca_df <- data.frame(PC1 = pca_result$rotation[, 1], PC2 = pca_result$rotation[, 2], PC3 = pca_result$rotation[, 3], Categoria = colnames(rlog_matrix))
+
+# Agregar una columna "Grupo" para cada columna en función de su nombre
+pca_df$Grupo <- ifelse(grepl("^SR", pca_df$Categoria), "SR",
+                ifelse(grepl("^SW", pca_df$Categoria), "SW",
+                ifelse(grepl("^CR", pca_df$Categoria), "CR",
+                ifelse(grepl("^CW", pca_df$Categoria), "CW", "Otro"))))
+
+# Crear un gráfico de PCA con colores personalizados, comparamos la PC1 y la PC2
+pca_plot <- ggplot(data = pca_df, aes(x = PC1, y = PC2, color = Grupo)) +
+  geom_point(size = 3) +
+  labs(title = "Gráfico de PCA", x = "Componente Principal 1", y = "Componente Principal 2")
+
+# Definir una paleta de colores personalizada
+colores_grupo <- c("SR" = "red", "SW" = "blue", "CR" = "green", "CW" = "purple", "Otro" = "gray")
+
+pca_plot + scale_color_manual(values = colores_grupo)
+
+
+pca_result
+#Comparamos ahora PC2 con PC3
+# Crear un gráfico de PCA comparando la Componente Principal 2 con la Componente Principal 3
+pca_plot <- ggplot(data = pca_df, aes(x = PC2, y = PC3, color = Grupo)) +
+  geom_point(size = 3) +
+  labs(title = "Gráfico de PCA (PC2 vs PC3)", x = "Componente Principal 2", y = "Componente Principal 3")
+
+# Definir una paleta de colores personalizada
+colores_grupo <- c("SR" = "red", "SW" = "blue", "CR" = "green", "CW" = "purple", "Otro" = "gray")
+
+pca_plot + scale_color_manual(values = colores_grupo)
+
+```
+
+
+Podemos ver que la componente principal 2 muestra una separación por tejidos y en la CP1 podemos ver como SR y SW tienen mayor dispersión. Viendo el gráfico de PC2 y PC3 podemos ver como SW muestra cierta estabilidad mientras SR es muy disperso.
+
+```{r}
+#Realizo un PCA por separado para cada zona del cerebro:
+
+# Dividir los datos en dos grupos: "SR" y "SW"
+group_SR_SW <- rlog_matrix[, colnames(rlog_matrix) %in% c("SR1", "SR2", "SR3", "SR4", "SW1", "SW2", "SW3", "SW4")]
+
+# Realizar PCA para el grupo "SR" y "SW"
+pca_SR_SW <- prcomp(group_SR_SW, scale = TRUE)
+
+# Crear un dataframe con los resultados del PCA para "SR" y "SW"
+pca_df_SR_SW <- data.frame(PC1 = pca_SR_SW$rotation[, 1], PC2 = pca_SR_SW$rotation[, 2], PC3 = pca_SR_SW$rotation[, 3], Categoria = colnames(group_SR_SW))
+pca_df_SR_SW$Grupo <- ifelse(grepl("^SR", pca_df_SR_SW$Categoria), "SR", "SW")
+
+# Crear un gráfico de PCA para "SR" y "SW" con colores personalizados (1 y 2 componente)
+pca_plot_SR_SW <- ggplot(data = pca_df_SR_SW, aes(x = PC1, y = PC2, color = Grupo)) +
+  geom_point(size = 3) +
+  labs(title = "Gráfico de PCA (SR y SW)", x = "Componente Principal 1", y = "Componente Principal 2")
+
+# Definir una paleta de colores personalizada
+colores_grupo_SR_SW <- c("SR" = "red", "SW" = "blue")
+
+# Mostrar el gráfico de PCA para "SR" y "SW"
+pca_plot_SR_SW + scale_color_manual(values = colores_grupo_SR_SW)
+# Crear un gráfico de PCA para "SR" y "SW" con colores personalizados (2 y 3 componente)
+pca_plot_SR_SW <- ggplot(data = pca_df_SR_SW, aes(x = PC2, y = PC3, color = Grupo)) +
+  geom_point(size = 3) +
+  labs(title = "Gráfico de PCA (SR y SW)", x = "Componente Principal 2", y = "Componente Principal 3")
+
+# Definir una paleta de colores personalizada
+colores_grupo_SR_SW <- c("SR" = "red", "SW" = "blue")
+
+# Mostrar el gráfico de PCA para "SR" y "SW"
+pca_plot_SR_SW + scale_color_manual(values = colores_grupo_SR_SW)
+
+# Dividir los datos en dos grupos: "CR" y "CW"
+group_CR_CW <- rlog_matrix[, colnames(rlog_matrix) %in% c("CR1", "CR2", "CR3", "CR4", "CW1", "CW2", "CW3", "CW4")]
+
+# Realizar PCA para el grupo "CR" y "CW"
+pca_CR_CW <- prcomp(group_CR_CW, scale = TRUE)
+
+# Crear un dataframe con los resultados del PCA para "CR" y "CW"
+pca_df_CR_CW <- data.frame(PC1 = pca_CR_CW$rotation[, 1], PC2 = pca_CR_CW$rotation[, 2], PC3 = pca_CR_CW$rotation[, 3], Categoria = colnames(group_CR_CW))
+pca_df_CR_CW$Grupo <- ifelse(grepl("^CR", pca_df_CR_CW$Categoria), "CR", "CW")
+
+# Crear un gráfico de PCA para "CR" y "CW" con colores personalizados (1 y 2 componente )
+pca_plot_CR_CW <- ggplot(data = pca_df_CR_CW, aes(x = PC1, y = PC2, color = Grupo)) +
+  geom_point(size = 3) +
+  labs(title = "Gráfico de PCA (CR y CW)", x = "Componente Principal 1", y = "Componente Principal 2")
+
+# Definir una paleta de colores personalizada
+colores_grupo_CR_CW <- c("CR" = "green", "CW" = "purple")
+
+# Mostrar el gráfico de PCA para "CR" y "CW"
+pca_plot_CR_CW + scale_color_manual(values = colores_grupo_CR_CW)
+
+# Crear un gráfico de PCA para "CR" y "CW" con colores personalizados (2 y 3 componente )
+pca_plot_CR_CW <- ggplot(data = pca_df_CR_CW, aes(x = PC2, y = PC3, color = Grupo)) +
+  geom_point(size = 3) +
+  labs(title = "Gráfico de PCA (CR y CW)", x = "Componente Principal 2", y = "Componente Principal 3")
+
+# Definir una paleta de colores personalizada
+colores_grupo_CR_CW <- c("CR" = "green", "CW" = "purple")
+
+# Mostrar el gráfico de PCA para "CR" y "CW"
+pca_plot_CR_CW + scale_color_manual(values = colores_grupo_CR_CW)
+
+
+
+```
+
+
+Mirando los gráficos de SW y SR podemos ver en el gráfico de CP2 y CP3 que hay una diferenciación clara entre las muestras de ratones sanos y los de ratones con Huntington.
+Si observamos los de CR y CW observamos lo mismo con la componente principal 3.
+
+```{r}
+#Correlación con todos los grupos
+correlation_matrix<-cor(rlog_matrix)
+library(reshape2)
+graficocorlog<-ggplot(data = melt(correlation_matrix), aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  theme_minimal() +
+  labs(title = "Mapa de correlación")
+graficocorlog
+correlation_matrix
+```
+
+
+
+Se observa correlación en general entre cada tejido.
+
+## Correlaciones entre grupos 
+```{r}
+# Calculo la matriz de correlaciones para SR con SW
+correlacion_SR_SW <- cor(rlog_matrix[, grepl("^SR|^SW", colnames(rlog_matrix))])
+
+# Calculo la matriz de correlaciones para CR con CW
+correlacion_CR_CW <- cor(rlog_matrix[, grepl("^CR|^CW", colnames(rlog_matrix))])
+
+# Visualización
+graficocorlog_SR_SW <- ggplot(data = melt(correlacion_SR_SW), aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  theme_minimal() +
+  labs(title = "Mapa de correlación para SR con SW")
+
+# Visualizar las correlaciones para CR con CW
+graficocorlog_CR_CW <- ggplot(data = melt(correlacion_CR_CW), aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  theme_minimal() +
+  labs(title = "Mapa de correlación para CR con CW")
+
+print(graficocorlog_SR_SW)
+print(graficocorlog_CR_CW)
+
+
+```
+
+
+Se ve algo de correlación entre las muestras de estriado sano y algo de correlación entre el córtex enfermo, pero no es muy definido
+
+ 
+## Longitud secuencias
+```{r}
+data_filtrado$Sequence_Length <- nchar(data_filtrado$Sequence)
+summary(data_filtrado$Sequence_Length)
+# longitud más común
+frecuencia <- table(data_filtrado$Sequence_Length)
+longitud_mas_comun <- as.numeric(names(frecuencia)[which.max(frecuencia)])
+longitud_mas_comun
+```
+```{r}
+# Crear DataFrames separados para cada grupo
+data_SR <- data_filtrado[, c("X", "Sequence", "tRNA", "short_trim1_SR1", "short_trim1_SR2", "short_trim1_SR3", "short_trim1_SR4")]
+data_SW <- data_filtrado[, c("X", "Sequence", "tRNA", "short_trim1_SW1", "short_trim1_SW2", "short_trim1_SW3", "short_trim1_SW4")]
+data_CR <- data_filtrado[, c("X", "Sequence", "tRNA", "short_trim1_CR1", "short_trim1_CR2", "short_trim1_CR3", "short_trim1_CR4")]
+data_CW <- data_filtrado[, c("X", "Sequence", "tRNA", "short_trim1_CW1", "short_trim1_CW2", "short_trim1_CW3", "short_trim1_CW4")]
+```
+
+```{r}
+#almacenamos las longitudes de secuencias para cada grupo.
+data_SR$Sequence_Length <- nchar(data_SR$Sequence)
+data_SW$Sequence_Length <- nchar(data_SW$Sequence)
+data_CR$Sequence_Length <- nchar(data_CR$Sequence)
+data_CW$Sequence_Length <- nchar(data_CW$Sequence)
+```
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# sumo contajes por longitud
+summarized_data_SR <- data_SR %>%
+  group_by(Sequence_Length) %>%
+  summarise(
+    short_trim1_SR1 = sum(short_trim1_SR1),
+    short_trim1_SR2 = sum(short_trim1_SR2),
+    short_trim1_SR3 = sum(short_trim1_SR3),
+    short_trim1_SR4 = sum(short_trim1_SR4)
+  )
+
+# Reorganización creando un dataframe con las sumas totales por muestra y longitud
+summarized_data_SR_long <- summarized_data_SR %>%
+  pivot_longer(
+    cols = starts_with("short_trim1_SR"),
+    names_to = "short_trim1",
+    values_to = "total_count"
+  )
+
+#gráfico comparativo
+ggplot(summarized_data_SR_long, aes(x = Sequence_Length, y = total_count, color = short_trim1)) +
+  geom_line() +
+  labs(
+    title = "Longitudes de secuencia en estriado enfermo",
+    x = "Longitud de secuencia",
+    y = "Suma de contajes",
+    color = "Muestra"
+  ) +
+  theme_minimal()
+
+# Para data_SW
+summarized_data_SW <- data_SW %>%
+  group_by(Sequence_Length) %>%
+  summarise(
+    short_trim1_SW1 = sum(short_trim1_SW1),
+    short_trim1_SW2 = sum(short_trim1_SW2),
+    short_trim1_SW3 = sum(short_trim1_SW3),
+    short_trim1_SW4 = sum(short_trim1_SW4)
+  )
+
+summarized_data_SW_long <- summarized_data_SW %>%
+  pivot_longer(
+    cols = starts_with("short_trim1_SW"),
+    names_to = "short_trim1",
+    values_to = "total_count"
+  )
+
+ggplot(summarized_data_SW_long, aes(x = Sequence_Length, y = total_count, color = factor(short_trim1))) +
+  geom_line() +
+  labs(
+    title = "Longitudes de secuencia en estriado sano",
+    x = "Longitud de secuencia",
+    y = "Suma de contajes",
+    color = "Muestra"
+  ) +
+  theme_minimal()
+
+# Para data_CR
+summarized_data_CR <- data_CR %>%
+  group_by(Sequence_Length) %>%
+  summarise(
+    short_trim1_CR1 = sum(short_trim1_CR1),
+    short_trim1_CR2 = sum(short_trim1_CR2),
+    short_trim1_CR3 = sum(short_trim1_CR3),
+    short_trim1_CR4 = sum(short_trim1_CR4)
+  )
+
+summarized_data_CR_long <- summarized_data_CR %>%
+  pivot_longer(
+    cols = starts_with("short_trim1_CR"),
+    names_to = "short_trim1",
+    values_to = "total_count"
+  )
+
+ggplot(summarized_data_CR_long, aes(x = Sequence_Length, y = total_count, color = factor(short_trim1))) +
+  geom_line() +
+  labs(
+    title = "Longitudes de secuencia en córtex enfermo",
+    x = "Longitud de secuencia",
+    y = "Suma de contajes",
+    color = "Muestra"
+  ) +
+  theme_minimal()
+
+# Para data_CW
+summarized_data_CW <- data_CW %>%
+  group_by(Sequence_Length) %>%
+  summarise(
+    short_trim1_CW1 = sum(short_trim1_CW1),
+    short_trim1_CW2 = sum(short_trim1_CW2),
+    short_trim1_CW3 = sum(short_trim1_CW3),
+    short_trim1_CW4 = sum(short_trim1_CW4)
+  )
+
+summarized_data_CW_long <- summarized_data_CW %>%
+  pivot_longer(
+    cols = starts_with("short_trim1_CW"),
+    names_to = "short_trim1",
+    values_to = "total_count"
+  )
+
+ggplot(summarized_data_CW_long, aes(x = Sequence_Length, y = total_count, color = factor(short_trim1))) +
+  geom_line() +
+  labs(
+    title = "Longitudes de secuencia en córtex sano",
+    x = "Longitud de secuencia",
+    y = "Suma de contajes",
+    color = "Muestra"
+  ) +
+  theme_minimal()
+
+
+```
+
+
+
+Vemos en general que la muestra 4 en estriado enfermo y en estriado sano difieren bastante con el resto de muestras, también SR2, que se parece algo más a SR4.De forma general podríamos decir que las muestras de los tejidos enfermos son menos parecidas/estables en comparación con los tejidos sanos.
+
+
+
