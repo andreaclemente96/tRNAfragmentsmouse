@@ -1,0 +1,393 @@
+---
+title: "optimizar datos y expresión diferencial"
+author: "Andrea Clemente Ureña"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+nombre_archivo <- "resultado_final.csv"
+resultado_final <- read.csv(nombre_archivo)
+#eliminar los valores de expect mayores a 9e-5
+resultado_final <- subset(resultado_final, Expect <= 9e-5)
+# Eliminar filas con porcentaje de identidad menor al 95%
+resultado_final <- subset(resultado_final, as.numeric(gsub("%", "", Similarity.Percentage))/100 >= 0.95)
+#Filtrar por el blast a 50
+resultado_final <- subset(resultado_final, Blast.Score >= 50)
+
+
+```
+```{r}
+library(dplyr)
+# Filtro filas donde tRNA.Type y Anticodon coincidan con la información en la columna tRNA
+resultado_final <- subset(resultado_final, tRNA.Type == sub(".*tRNA-(\\w+)-(\\w+)-.*", "\\1", tRNA) & Anticodon == sub(".*tRNA-(\\w+)-(\\w+)-.*", "\\2", tRNA))
+#Elimino secuencias duplicadas
+resultado_final <- resultado_final %>%
+  distinct(Sequence, .keep_all = TRUE)
+```
+
+```{r}
+library(DESeq2)
+
+nombre_archivo <- "data_filtrado.csv"
+data_filtrado <- read.csv(nombre_archivo)
+
+# Guardo las primeras tres columnas
+columnas_no_numericas <- data_filtrado[, 1:3]
+
+# Guardo las columnas de expresión
+columnas_expresion <- data_filtrado[, -c(1, 2, 3)]
+
+#vector de grupos correspondientes a las columnas
+nombres_columnas <- colnames(columnas_expresion)
+
+#DataFrame con la información de las condiciones
+condiciones <- data.frame(
+  condicion = factor(rep(c("SR", "SW", "CR", "CW"), each = length(nombres_columnas) / 4))
+)
+
+# objeto DESeqDataSet
+dds <- DESeqDataSetFromMatrix(
+  countData = columnas_expresion,
+  colData = condiciones,
+  design = ~ condicion
+)
+
+# Análisis de expresión diferencial
+dds <- DESeq(dds)
+
+# Extraigo la matriz de expresión transformada rlog
+logarit <- rlog(dds)
+rlog_matrix <- assay(logarit)
+
+# Agregp las columnas no numéricas a la matriz rlog
+rlog_matrix_con_secuencias <- cbind(columnas_no_numericas, rlog_matrix)
+# Elimino columna X y tRNA
+columnas_a_eliminar <- c("X", "tRNA")
+rlog_matrix_con_secuencias <- rlog_matrix_con_secuencias[, !colnames(rlog_matrix_con_secuencias) %in% columnas_a_eliminar]
+
+
+# Comparar SW con SR
+resultado_SR_SW <- results(dds, contrast = c("condicion", "SR", "SW"), alpha = 0.05)
+
+# Comparar CW con CR
+resultado_CR_CW <- results(dds, contrast = c("condicion", "CR", "CW"), alpha = 0.05)
+
+summary(resultado_SR_SW)
+summary(resultado_CR_CW)
+```
+
+```{r}
+library(ggplot2)
+
+
+realizarAnalisisVolcano <- function(dds, cond1, cond2, titulo) {
+  resultado <- results(dds, contrast = c("condicion", cond1, cond2), alpha = 0.05)
+  
+  # Objeto DESeqResults a un data.frame
+  resultado_df <- as.data.frame(resultado)
+  
+  
+  # Crear Volcano Plot
+  ggplot(resultado_df, aes(x = log2FoldChange, y = -log10(pvalue))) +
+    
+    # Puntos no significativos (log2foldchange entre -0.3 y 0.3 y pvalue > 0.05) 
+    geom_point(data = subset(resultado_df, log2FoldChange >= -0.3 & log2FoldChange <= 0.3 & pvalue > 0.05),
+               aes(color = "No Significativo"), size = 3) +
+    
+    # Todos los puntos en la capa principal
+    geom_point(aes(color = ifelse(pvalue <= 0.05, ifelse(log2FoldChange < -0.3, "Downregulado", ifelse(log2FoldChange > 0.3, "Upregulado", "No Significativo")), "No Significativo")), 
+               size = 3) +
+    
+    # Líneas horizontales para cortar por p-valor
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray", size = 1) +
+    
+    # Líneas verticales para cortar por log2FoldChange
+    geom_vline(xintercept = c(-0.3, 0.3), linetype = "dashed", color = "gray", size = 1) +
+    
+    theme_minimal() +
+    labs(title = titulo,
+         x = "Log2 Fold Change",
+         y = "-log10(P-value)",
+         color = "Significación",
+         subtitle = paste("Upregulados", "Downregulados:")) +
+    
+    # Escala y límites
+    scale_y_continuous(limits = c(0, 25)) +
+    scale_x_continuous(limits = c(-4, 6)) +
+    
+    scale_color_manual(values = c("Downregulado" = "#6666FF", "Upregulado" = "#FF6666", "No Significativo" = "gray")) +
+    
+    theme(legend.position = "top")
+}
+
+# Comparar 
+resultado_SR_SW <- realizarAnalisisVolcano(dds, "SR", "SW", "Volcano plot: Tejido estriado con Huntington vs tejido estriado control")
+resultado_CR_CW <- realizarAnalisisVolcano(dds, "CR", "CW", "Volcano plot: Córtex con Huntington vs córtex control")
+# Mostrar el resultado
+print(resultado_SR_SW)
+print(resultado_CR_CW)
+
+```
+
+
+
+```{r}
+
+# Obtener los resultados desde DESeq2
+resultado_SR_SW <- results(dds, contrast = c("condicion", "SR", "SW"), alpha = 0.05)
+
+head(resultado_SR_SW)
+
+```
+```{r}
+# Añadir la columna de log2FoldChange y pvalor a rlog_matrix_con_secuencias 
+rlog_matrix_con_expresion <- cbind(rlog_matrix_con_secuencias, log2FoldChange = resultado_SR_SW$log2FoldChange, pvalor = resultado_SR_SW$pvalue)
+# Ordenar el dataframe por la columna log2FoldChange
+rlog_matrix_con_expresion_ordenado <- rlog_matrix_con_expresion[order(rlog_matrix_con_expresion$log2FoldChange, decreasing = TRUE), ]
+print("rlog_matrix_con_expresion ordenado por log2FoldChange:")
+
+#columnas_a_quitar <- grep("^short_trim1_C", colnames(rlog_matrix_con_expresion_ordenado))
+#rlog_matrix_con_expresion_ordenadoS <- rlog_matrix_con_expresion_ordenado[, -columnas_a_quitar]
+
+head(rlog_matrix_con_expresion_ordenado)
+
+#resultado_CW_CR1 <- results(dds, contrast = c("condicion", "CW", "CR"), alpha = 0.05)
+
+# Añadir la columna de log2FoldChange y pvalor a rlog_matrix_con_secuencias 
+#rlog_matrix_con_expresionC <- cbind(rlog_matrix_con_secuencias, log2FoldChange = resultado_CW_CR1$log2FoldChange, pvalor = resultado_CW_CR1$pvalue)
+# Ordenar el dataframe por la columna log2FoldChange
+#rlog_matrix_con_expresion_ordenadoC <- rlog_matrix_con_expresionC[order(rlog_matrix_con_expresionC$log2FoldChange, decreasing = TRUE), ]
+
+#columnas_a_quitar <- grep("^short_trim1_S", colnames(rlog_matrix_con_expresion_ordenado))
+#rlog_matrix_con_expresion_ordenadoCC <- rlog_matrix_con_expresion_ordenadoC[, -columnas_a_quitar]
+#head(rlog_matrix_con_expresion_ordenadoCC)
+
+```
+```{r}
+# Obtener las primeras 30 filas con los mayores valores de log2FoldChange
+top_203 <- rlog_matrix_con_expresion_ordenado[1:203, ]
+
+# Obtener las últimas 203 filas con los menores valores de log2FoldChange
+bottom_30 <- rlog_matrix_con_expresion_ordenado[(nrow(rlog_matrix_con_expresion_ordenado) - 29):nrow(rlog_matrix_con_expresion_ordenado), ]
+
+# Obtener los 30 genes más expresados
+genes_mas_expresados_rlog <- top_203
+
+# Obtener los 203 genes menos expresados
+genes_menos_expresados_rlog <- bottom_30
+
+print("Genes más expresados en rlog_matrix SR vs SW:")
+head(genes_mas_expresados_rlog)
+
+print("Genes menos expresados en rlog_matrix SR vs SW:")
+head(genes_menos_expresados_rlog)
+
+
+```
+
+```{r}
+# la columna clave es "Sequence"
+key_column <- "Sequence"
+
+# Crear un dataframe con la información de los genes más expresados
+genes_mas_expresados_original <- merge(
+  genes_mas_expresados_rlog,
+  resultado_final,
+  by.x = key_column,
+  by.y = key_column,
+  all.x = TRUE
+)
+
+# Crear un dataframe con la información de los genes menos expresados
+genes_menos_expresados_original <- merge(
+  genes_menos_expresados_rlog,
+  resultado_final,
+  by.x = key_column,
+  by.y = key_column,
+  all.x = TRUE
+)
+
+
+```
+
+```{r}
+# Columnas a conservar
+columnas_a_conservar <- c("Sequence", "log2FoldChange", "pvalor", "Subject", "tRNA", "tsRNA.Type")
+
+# Eliminar filas con NA y conservar las columnas que necesito 
+genes_mas_expresados_final <- na.omit(subset(genes_mas_expresados_original, select = columnas_a_conservar))
+genes_menos_expresados_final <- na.omit(subset(genes_menos_expresados_original, select = columnas_a_conservar))
+
+head(genes_mas_expresados_final)
+head(genes_menos_expresados_final)
+
+```
+```{r}
+library(ggplot2)
+
+# Agregar una columna "Condicion"
+genes_menos_expresados_final$Condicion <- "Infraexpresados"
+genes_mas_expresados_final$Condicion <- "Sobreexpresados"
+
+# Combinar los dataframes con rbind
+genes_combinados <- rbind(genes_menos_expresados_final, genes_mas_expresados_final)
+
+# Intercalar las condiciones
+genes_combinados$tsRNA.Type <- factor(genes_combinados$tsRNA.Type, levels = unique(genes_combinados$tsRNA.Type))
+
+# Crear un gráfico de barras combinado con facet_wrap y posición agrupada
+ggplot(genes_combinados, aes(x = tsRNA.Type, fill = Condicion)) +
+  geom_bar(position = "dodge", stat = "count") +
+  labs(title = "Tipos de tRFs en el tejido estriado con Huntington",
+       subtitle = "Comparación entre tRFs sobreexpresados e infraexpresados",
+       x = "Tipo de tRF",
+       y = "Conteo",
+       fill = "Condicion") +
+  theme_minimal() +
+  theme(legend.position = "top") +
+  facet_wrap(~ Condicion, scales = "free_x", ncol = 1)
+
+
+```
+```{r}
+
+# Función para calcular porcentajes
+calcular_porcentajes <- function(df) {
+  df$tsRNA.Type <- sub(":.*", "", df$tsRNA.Type)
+  counts <- table(df$tsRNA.Type)
+  percentages <- prop.table(counts) * 100
+  return(data.frame(tsRNA.Type = names(percentages), Percentage = as.numeric(percentages)))
+}
+
+# Calcular porcentajes para los dos dataframes
+porcentajes_menos_expresados <- calcular_porcentajes(genes_menos_expresados_final)
+porcentajes_mas_expresados <- calcular_porcentajes(genes_mas_expresados_final)
+
+# Mostrar la tabla de porcentajes
+print("Tipos de tRFs sobreexpresados en el tejido estriado con Huntington")
+print(porcentajes_mas_expresados)
+
+print("Tipos de tRFs infraexpresados en el tejido estriado con Huntington")
+print(porcentajes_menos_expresados)
+```
+```{r}
+
+library(ggplot2)
+
+# Extraer la parte Family_11:tRNA-Ala-CGC
+genes_menos_expresados_final$tRNA <- sub(":.*", "", genes_menos_expresados_final$tRNA)
+genes_mas_expresados_final$tRNA <- sub(":.*", "", genes_mas_expresados_final$tRNA)
+
+# Agregar una columna "Condicion"
+genes_menos_expresados_final$Condicion <- "Infraexpresados"
+genes_mas_expresados_final$Condicion <- "Sobreexpresados"
+
+# Combinar los dataframes con rbind
+genes_combinados_tRNA <- rbind(genes_menos_expresados_final, genes_mas_expresados_final)
+
+# Intercalar las condiciones
+genes_combinados_tRNA$tRNA <- factor(genes_combinados_tRNA$tRNA, levels = unique(genes_combinados_tRNA$tRNA))
+
+# Crear un gráfico de barras combinado con facet_wrap y posición agrupada
+ggplot(genes_combinados_tRNA, aes(x = tRNA, fill = Condicion)) +
+  geom_bar(position = "dodge", stat = "count") +
+  labs(title = "Tipos de familias de tRNA en el tejido estriado con Huntington",
+       subtitle = "Comparación entre familias de tRNA sobreexpresadas e infraexpresadas",
+       x = "Familia de tRNA",
+       y = "Conteo",
+       fill = "Condicion") +
+  theme_minimal() +
+  theme(legend.position = "top") +
+  facet_wrap(~ Condicion, scales = "free_x", ncol = 1) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+```{r}
+
+# Función para calcular porcentajes
+calcular_porcentajes <- function(df) {
+  df$tRNA <- sub(":.*", "", df$tRNA)
+  counts <- table(df$tRNA)
+  percentages <- prop.table(counts) * 100
+  result <- data.frame(tRNA = names(percentages), Percentage = as.numeric(percentages))
+  return(result)
+}
+
+# Calcular porcentajes
+porcentajes_menos_expresados <- calcular_porcentajes(genes_menos_expresados_final)
+porcentajes_mas_expresados <- calcular_porcentajes(genes_mas_expresados_final)
+# Ordenar porcentajes
+porcentajes_menos_expresados <- porcentajes_menos_expresados[order(-porcentajes_menos_expresados$Percentage), ]
+porcentajes_mas_expresados <- porcentajes_mas_expresados[order(-porcentajes_mas_expresados$Percentage), ]
+
+print("Porcentajes de familias de tRNA sobreexpresados en el tejido estriado con Huntington")
+print(porcentajes_mas_expresados)
+print("Porcentajes de familias de tRNA infraexpresados en el tejido estriado con Huntington")
+head(porcentajes_menos_expresados)
+
+```
+Podemos ver que la mayoría de los tRFs sobreexpresados en el tejido estriado afectado con Huntington son inter tRF y la familia más común es  
+Family_145:tRNA-Met-CAT-1.
+
+```{r}
+library(dplyr)
+
+#CON LOS VALORES FILTRADOS 
+
+# Sumar los valores por fila de short_trim1_SR1, short_trim1_SR2, short_trim1_SR3, short_trim1_SR4
+resultadoconfiltrosfamilia <- resultado_final %>%
+  mutate(estriado_huntington = rowSums(select(., starts_with("SR"))))
+
+# Sumar los valores por fila de short_trim1_SW1, short_trim1_SW2, short_trim1_SW3, short_trim1_SW4
+resultadoconfiltrosfamilia <- resultadoconfiltrosfamilia %>%
+  mutate(estriado_control = rowSums(select(., starts_with("SW"))))
+
+# Seleccionar solo las columnas deseadas 
+resultadoconfiltrosfamilia<- resultadoconfiltrosfamilia %>%
+  select(tRNA, estriado_huntington, estriado_control)
+
+# Extraer la parte "Family" de la columna tRNA
+resultadoconfiltrosfamilia <- resultadoconfiltrosfamilia %>%
+  mutate(family = sub(":.*", "", tRNA))
+
+# Agrupar por la columna "family" y sumar
+resultadoconfiltrosfamilia <- resultadoconfiltrosfamilia %>%
+  group_by(family) %>%
+  summarise(estriado_huntington = sum(estriado_huntington),
+            estriado_control = sum(estriado_control))
+head(resultadoconfiltrosfamilia)
+
+#POR GRUPO
+# Sumar los valores por fila de short_trim1_SR1, short_trim1_SR2, short_trim1_SR3, short_trim1_SR4
+resultadoconfiltrosgrupo <- resultado_final %>%
+  mutate(estriado_huntington = rowSums(select(., starts_with("SR"))))
+
+# Sumar los valores por fila de short_trim1_SW1, short_trim1_SW2, short_trim1_SW3, short_trim1_SW4
+resultadoconfiltrosgrupo <- resultadoconfiltrosgrupo %>%
+  mutate(estriado_control = rowSums(select(., starts_with("SW"))))
+
+# Seleccionar solo las columnas deseadas 
+resultadoconfiltrosgrupo <- resultadoconfiltrosgrupo %>%
+  select(estriado_huntington, estriado_control, tsRNA.Type)  
+
+# Agrupar por la columna "tsRNA.Type" y sumar
+resultadoconfiltrosgrupo <- resultadoconfiltrosgrupo %>%
+  group_by(tsRNA.Type) %>%
+  summarise(estriado_huntington = sum(estriado_huntington),
+            estriado_control = sum(estriado_control))
+head(resultadoconfiltrosgrupo)
+
+
+```
+
+
+
+
+

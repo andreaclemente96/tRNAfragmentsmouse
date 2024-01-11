@@ -1,0 +1,213 @@
+---
+title: "Comparación con tSRBase"
+author: "Andrea Clemente Ureña"
+date: "2023-11-20"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+all_sequence_tRNA_level_ok <- read.delim("C:/Users/andea/OneDrive/Escritorio/TFM/all_sequence_tRNA_level_ok.csv")
+```
+
+
+Eliminar todas las filas que no tengan minimo 5 veces de expresión en 4 zonas de cerebro de ratones.
+
+```{r}
+library(dplyr)
+datoscrudos<-all_sequence_tRNA_level_ok
+#Reordenar filas 
+datoscrudos <- datoscrudos %>%
+  select(X, Sequence, tRNA, short_trim1_SR1, everything())
+
+# Conteo de valores mayores o iguales a 5 en las columnas "short_trim1_"
+conteos <- rowSums(datoscrudos[, grepl("short_trim1_", names(datoscrudos))] >= 5)
+
+# Filtrar las filas 
+data_filtrado <- datoscrudos[conteos >= 4, ]
+
+# Nombres de las columnas
+nombres_columnas <- colnames(data_filtrado)
+
+# Eliminar la parte común "short_trim1_"
+nuevos_nombres <- sub("^short_trim1_", "", nombres_columnas)
+
+# Asignar los nuevos nombres a las columnas del dataframe
+colnames(data_filtrado) <- nuevos_nombres
+ head(data_filtrado)
+```
+
+
+```{r}
+#Fasta de las secuencias de nuestro dataframe
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+#BiocManager::install("Biostrings")
+```
+```{r}
+library(Biostrings)
+library(ape)
+
+# Nombre del archivo de salida en formato fasta
+fasta_file <- "output.fasta"
+
+# Abrir el archivo
+con <- file(fasta_file, "w")
+
+# Escribir las secuencias en formato FASTA
+for (i in seq_along(data_filtrado$Sequence)) {
+  cat(">", paste0("Seq", i), "\n", data_filtrado$Sequence[i], "\n", file = con, append = TRUE)
+}
+
+# Cerrar el archivo
+close(con)
+
+cat(paste("Se ha creado el archivo", fasta_file, "con éxito.\n"))
+```
+
+```{r}
+#Obtener mis mmu a partir de las secuencias
+library(XML)
+library(RCurl)
+library(rlist)
+
+# Función para obtener la tabla 
+get_table_from_page <- function(page_number) {
+  url <- paste("http://tsrbase.org/blastresult.php?jobid=170051721851&opt=none", sep="")
+  theurl <- getURL(url, .opts = list(ssl.verifypeer = FALSE))
+  doc <- htmlParse(theurl, asText = TRUE)
+  tables <- readHTMLTable(doc)
+  tables <- list.clean(tables, fun = is.null, recursive = FALSE)
+  return(tables)
+}
+
+# Llamar a la función con el número de página
+tablamusseq <- get_table_from_page(1)
+
+
+head(tablamusseq)
+
+```
+```{r}
+#  Obtener la tercera tabla de la lista que es la que tiene la información que nos interesa.
+tabla_tercera <- tablamusseq[[3]]
+
+# Filtrar solo la primera fila para cada secuencia
+tablamusseq_filtrada <- lapply(unique(tabla_tercera$Query), function(seq) {
+  filtro <- tabla_tercera$Query == seq
+  return(tabla_tercera[filtro, ][1, ])
+})
+
+# Combinra la lista resultante en un data frame
+tablamusseq_filtrada <- do.call(rbind, tablamusseq_filtrada)
+
+
+head(tablamusseq_filtrada)
+
+
+```
+
+
+```{r}
+#Obtenemos la base de datos de tsrbase para posteriormente obtener la información de nuestros mmu.
+library(data.table)
+
+# Función para extraer y combinar columnas específicas de las tablas 'resultTable'
+extract_and_combine_columns <- function(all_tables) {
+  extracted_columns_list <- lapply(all_tables, function(tbl) {
+    if (!is.null(tbl$resultTable)) {
+      return(tbl$resultTable[, .(ID, `tRNA type`, Anticodon, `tsRNA Type`, Species)])
+    } else {
+      return(NULL)
+    }
+  })
+
+  # Eliminar elementos nulos
+  extracted_columns_list <- list.clean(extracted_columns_list, fun = is.null, recursive = FALSE)
+
+  # Convertir la lista de columnas extraídas en una sola tabla
+  combined_result_columns <- rbindlist(extracted_columns_list)
+
+  return(combined_result_columns)
+}
+
+# Obtener las páginas y extraer las tablas
+all_tables <- list()
+
+for (page_number in 1:508) {
+  url <- paste("http://www.tsrbase.org/searchtype.php?page=", page_number, "&submit=Get%20sequences&sel_Province=Mus%20musculus&sel_City=&sel_County=&pos=All", sep="")
+  doc <- htmlParse(url, encoding = "UTF-8")
+  result_table <- readHTMLTable(doc["//table[@class='resultTable']"][[1]])
+  all_tables[[page_number]] <- result_table
+}
+
+
+```
+
+```{r}
+library(data.table)
+
+# rbindlist directamente sobre la lista de tablas
+combined_result_table <- rbindlist(all_tables)
+
+# Eliminar filas con NA
+combined_result_table <- na.omit(combined_result_table)
+
+
+head(combined_result_table)
+
+
+```
+
+```{r}
+#Hacemos una tabla de nuestro archivo fasta para obtener las secuencias con su Seq, así posteriormente se podrá relacionar con la tabla combinada de nuestros mmu con la base de datos.
+
+library(Biostrings)
+
+# Leer el archivo FASTA
+fasta_data <- readDNAStringSet("output.fasta")
+
+# Crear un dataframe con dos columnas
+fasta_df <- data.frame(Seq_ID = names(fasta_data), Sequence = as.character(fasta_data), stringsAsFactors = FALSE)
+
+# Imprimir el dataframe
+head(fasta_df)
+
+
+
+```
+```{r}
+#Realizamos ajustes para poder combinar las secuencias con tablamusseq_filtrada
+fasta_df$Query <- trimws(fasta_df$Seq_ID)
+mmuconsecuencia <- merge(tablamusseq_filtrada, fasta_df, by = "Query", all.x = TRUE)
+
+```
+```{r}
+# Realizar la combinación utilizando la columna "Subject" e "ID"
+resultado_final <- merge(mmuconsecuencia, combined_result_table, by.x = "Subject", by.y = "ID", all.x = TRUE)
+
+head(resultado_final)
+
+
+
+```
+```{r}
+
+# Realizar la combinación utilizando la columna "Sequence" con nuestros datos con los contajes
+resultado_final_combinado <- merge(resultado_final, data_filtrado, by.x = "Sequence", by.y = "Sequence", all.x = TRUE)
+
+resultado_final_combinado <- resultado_final_combinado[, c("Sequence", "Subject", "Query", "tRNA Type", "Anticodon","tRNA", "tsRNA Type", "Blast Score", "Identities (Query length)", "Similarity Percentage", "Expect", "SR1", "SR2", "SR3", "SR4", "SW1", "SW2", "SW3", "SW4", "CR1", "CR2", "CR3", "CR4", "CW1", "CW2", "CW3", "CW4")]
+
+head(resultado_final_combinado)
+#Guardamos tabla en csv.
+write.csv(resultado_final_combinado, file = "resultado_final.csv", row.names = FALSE)
+
+```
+
+
+
